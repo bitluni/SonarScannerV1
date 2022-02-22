@@ -1,0 +1,196 @@
+<html>
+	<head>
+		<script>
+			//bitluni was here
+			//const baud = 2000000;
+			const baud = 921600;
+			let depth = 256;
+			let distance = 1000;
+			let start = 80;
+			let serialPortArray;
+			let maxx = 64;
+			let context;
+			let ctx;
+			let data;
+			let p;
+			let xs;
+			let ys;
+			
+			function renderData(arrayData)
+			{
+				const distanceR = distance / 2;
+				const startR = start / 2;
+				const totalR = startR + distanceR;
+				const mm2pix = ys / totalR;
+				const data2mm = distanceR / depth;
+				const data2pix = data2mm * mm2pix;
+				const startPix = startR * mm2pix;
+				const totalPix = totalR * mm2pix;
+
+				let x0 = xs * 0.5;
+				let y0 = ys - 1;
+				for(let y = 0; y < ys; y++)
+					for(let x = 0; x < xs; x++)
+					{
+						let dx = x - x0;
+						let dy = y - y0;
+						let d = Math.sqrt(dx * dx + dy * dy);
+						let a = ((Math.atan2(dy, dx) + Math.PI * 0.5) / (Math.PI / 180 * 60) + 0.5) * maxx;
+						//let a = ((Math.atan2(dy, dx) / (0.5 * Math.PI)) + 1.5) * maxx;
+						let a0 = Math.floor(a);
+						let as = a - a0;
+						let v = 0;
+						let alpha = 0;
+						if(a0 >= 0 && a0 < maxx)
+						{
+							let col0 = arrayData[a0];
+							let col1 = (a0 < maxx - 1)?arrayData[a0 + 1]: col0;
+							let i = (d - startPix) / data2pix;
+							let i0 = Math.floor(i);
+							let is = i - i0;
+							if(i0 >= 30 && i0 < depth)
+							{
+								let v00 = col0[i0];
+								let v10 = col1[i0];
+								let v01 = v00;
+								let v11 = v10;
+								if(i0 < depth - 1)
+								{
+									v01 = col0[i0 + 1];
+									v11 = col1[i0 + 1];
+								}
+								v = (v00 * (1 - as) + v10 * as) * (1 - is) + 
+									(v01 * (1 - as) + v11 * as) * is;
+								alpha = 255;
+							}
+						}
+						let s = (xs * y + x) * 4;
+						p[s + 0] = v;
+						p[s + 1] = v;
+						p[s + 2] = v;
+						p[s + 3] = alpha;
+					}
+				ctx.putImageData(data, 0, 0);	
+			}
+
+			async function connectArray()
+			{
+				//const log = document.getElementById('arr');
+				try 
+				{
+					const port = await navigator.serial.requestPort();
+					for(let ei = 0; ei < 10; e++)
+					{
+						try
+						{
+							serialPortArray = port;
+							await port.open({ baudRate: baud });
+							const decoder = new TextDecoderStream();
+							port.readable.pipeTo(decoder.writable);
+							const inputStream = decoder.readable;
+							const reader = inputStream.getReader();
+							var cv = "";
+
+							canvas = document.getElementById("scan");
+							ctx = canvas.getContext("2d");
+							xs = canvas.width;
+							ys = canvas.height;
+							data = ctx.getImageData(0, 0, xs, ys);
+							p = data.data;
+							
+							ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+							while (true) 
+							{
+								const { value, done } = await reader.read();
+								if (value) 
+								{
+									cv += value;
+									var arr = cv.split("\n");
+									if(arr.length > 1)
+									{
+										while(arr.length > 1) 
+										{
+											var line = arr.shift().trim();
+											if(line.length < 16) continue;
+											maxx = parseInt(line.substr(0, 4), 16);
+											depth = parseInt(line.substr(4, 4), 16);
+											start = parseInt(line.substr(8, 4), 16);
+											distance = parseInt(line.substr(12, 4), 16);
+											console.log("xres " + maxx + " yres " + depth + " start " + start + " distance " + distance);
+											let arrayData = new Array(maxx);
+											let p = 16;
+											for(let x = 0; x < maxx; x++)
+											{
+												let a = new Array(depth);
+												for(let i = 0; i < depth; i++)
+												{
+													//if(p >= line.length - 2) continue;
+													//let h = parseInt(line.substr(p, 2), 16);
+													//p += 2;
+
+													if(p >= line.length - 1) continue;
+													let h = parseInt(line.substr(p, 1), 16) * 16;
+													p += 1;
+
+													a[i] = h;
+													//p[(64 * (63 - i) + x) * 4 + 0] = h
+													//p[(64 * (63 - i) + x) * 4 + 1] = 0;
+													//p[(64 * (63 - i) + x) * 4 + 2] = 255 - h;
+													//p[(64 * (63 - i) + x) * 4 + 3] = 255;
+												}
+												arrayData[x] = a;
+											}
+											renderData(arrayData);
+											//ctx.putImageData(data, 0, 0);									
+										}
+									}
+									cv = arr.join("\n");
+								}
+								if (done) 
+								{
+									console.log('[readLoop] DONE', done);
+									reader.releaseLock();
+									break;
+								}
+							}
+						}
+						catch (error) 
+						{
+							console.log(error);
+							port.close();
+						}
+					}
+				} 
+				catch (error) 
+				{
+					serialPortArray = null;
+					console.log(error);
+				}
+			}
+
+			function updateArray(width, depth)
+			{
+				sendArray(width + " " + depth);
+			}
+
+			async function sendArray(text)
+			{
+				const encoder = new TextEncoder();
+				const writer = serialPortArray.writable.getWriter();
+				await writer.write(encoder.encode(text + "\n"));
+				writer.releaseLock();
+			}
+
+			function sleep(ms) {
+  				return new Promise(resolve => setTimeout(resolve, ms));
+			}
+
+		</script>
+	</head>
+	<body style="font-family: Arial, Helvetica, sans-serif; background-color: #001;" onload=""><center>
+		<!--h1 style="color: #800;"><a style="color: #800;" href="https://youtube.com/bitlunislab">bitluni's</a> phased array scanner</h1-->
+		<canvas id="scan" width="512" height="512" style="zoom: 1.5;border-style: solid; border-color: #111;"></canvas><br><br>
+		<!--input onchange="sendArray(this.value); this.value = '';"-->   <button onclick="connectArray()">Connect Array</button><input id="p0" type="range" value="128" min="16" max="256" oninput="updateArray(64, this.value);"></center>
+	</body>
+</html>
